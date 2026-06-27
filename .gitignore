@@ -1,0 +1,11 @@
+data/
+CLAUDE.md
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.DS_Store
