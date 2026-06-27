@@ -1,5 +1,6 @@
 data/
 CLAUDE.md
+ProjectIcarusBrief.md
 __pycache__/
 *.pyc
 *.pyo
@@ -8,4 +9,5 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+.ruff_cache/
 .DS_Store
