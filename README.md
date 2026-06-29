@@ -1,11 +1,58 @@
-# Icarus — Quant Portfolio Research Pipeline
+# Icarus — Quantitative Portfolio Research Pipeline
 
-An end-to-end quantitative equity research pipeline built as a portfolio project
-targeting quant research internships (equity factor research, multi-asset/tactical
-allocation). Every stage is hand-rolled and explainable in an interview.
+A complete, end-to-end equity factor research pipeline: universe construction → alpha signals → risk model → portfolio optimization → walk-forward backtest → evaluation. Every component is written from scratch — no pyfolio, no QuantStats wrappers.
 
-**Guiding principle**: one example of each idea, not every variation — two factors,
-one risk model, one optimizer, hand-rolled metrics.
+---
+
+## Pipeline at a Glance
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  yfinance / Wikipedia                                                   │
+│        │                                                                │
+│        ▼                                                                │
+│  ┌─────────────┐    ┌──────────────┐    ┌──────────────┐               │
+│  │  Universe   │───▶│   Factors    │───▶│ Alpha Model  │               │
+│  │  ~50 S&P    │    │  Momentum    │    │ Rank-Average │               │
+│  │  stocks     │    │  Reversal    │    │ vs XGBoost   │               │
+│  └─────────────┘    └──────────────┘    └──────┬───────┘               │
+│                                                │                       │
+│  ┌─────────────┐    ┌──────────────┐           │                       │
+│  │  Optimizer  │◀───│  Risk Model  │◀──────────┘                       │
+│  │  Mean-Var   │    │ Ledoit-Wolf  │                                    │
+│  │  QP (cvxpy) │    │  Covariance  │                                    │
+│  └──────┬──────┘    └──────────────┘                                    │
+│         │                                                               │
+│         ▼                                                               │
+│  ┌─────────────────────────────────────────────┐                       │
+│  │  Expanding-Window Monthly Backtest Loop     │                       │
+│  │  (47 out-of-sample rebalance periods)       │                       │
+│  └──────────────────────┬──────────────────────┘                       │
+│                         │                                               │
+│                         ▼                                               │
+│         Sharpe · Max Drawdown · IC · IC IR                             │
+│                    Streamlit Dashboard                                  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Results
+
+**Backtest period**: 2019–2024 · 29 tickers · 47 independent monthly rebalance periods
+
+| Model | Sharpe (ann.) | Mean IC | IC IR |
+|---|---|---|---|
+| Rank-Average (baseline) | **1.13** | −0.0105 | −0.13 |
+| XGBoost | 0.94 | −0.0366 | −0.52 |
+
+**Finding: the rank-average baseline retained.**
+
+XGBoost shows lower Sharpe and worse IC across all 47 periods. With only two factors over a ~29-stock cross-section, the model has insufficient variation to learn real signal before it overfits. Adding complexity here is not justified — that is the honest finding.
+
+> *Positive Sharpe with near-zero IC is not a contradiction.* The portfolio is long-only and fully invested, so it earns a positive market beta. The 2019–2024 sample included a strong equity bull run. Sharpe measures total risk-adjusted return; IC measures cross-sectional ranking accuracy — these are orthogonal.
+
+> *Near-zero IC is expected given the setup:* the standard error of mean IC is `std_IC / √47 ≈ 0.015`, so a mean IC of −0.0105 is statistically indistinguishable from zero. Signal is either genuinely absent on this small universe or buried beneath survivorship-bias-inflated returns.
 
 ---
 
@@ -13,37 +60,31 @@ one risk model, one optimizer, hand-rolled metrics.
 
 | Library | Role |
 |---|---|
-| `pandas`, `numpy`, `yfinance`, `pyarrow` | Data ingestion and storage |
+| `pandas` `numpy` `yfinance` `pyarrow` | Data ingestion and Parquet storage |
 | `scikit-learn` | Ledoit-Wolf covariance estimation |
-| `xgboost` | Conditional ML alpha model |
-| `cvxpy` | Mean-variance portfolio optimizer |
-| `scipy.stats` | IC validation (Spearman, ground-truth check) |
-| `streamlit` | Dashboard (reads precomputed files only) |
+| `xgboost` | ML alpha model (conditional on IC test) |
+| `cvxpy` | Mean-variance QP optimizer |
+| `scipy.stats` | IC Spearman correlation (ground-truth check) |
+| `streamlit` | Dashboard (reads precomputed Parquet files) |
 
-Python 3.11, conda environment `icarus`.
+Python 3.11 · conda environment `icarus`
 
 ---
 
-## Setup
+## Quick Start
 
 ```bash
 conda create -n icarus python=3.11 -y
 conda activate icarus
 pip install pandas numpy yfinance pyarrow scikit-learn xgboost cvxpy scipy streamlit pytest
-```
 
----
-
-## Running the pipeline
-
-```bash
-# 1. Download data and run both backtests (~15 min total)
+# Download data + run both backtests (~15 min on first run; cached after that)
 python run_pipeline.py
 
-# 2. Launch dashboard
+# Launch dashboard
 streamlit run app.py
 
-# 3. Run test suite (excludes slow backtest integration tests)
+# Tests (fast)
 pytest tests/ --ignore=tests/test_backtest_loop.py
 
 # Full test suite including backtest integration (~7 min)
@@ -52,35 +93,41 @@ pytest tests/
 
 ---
 
-## Pipeline stages
+## Source Layout
 
 ```
-Stage 1  universe.py + data_pipeline.py   Universe construction, filters, Parquet cache
-Stage 2  factors.py                        Momentum (12-1 month) + reversal (1 month)
-Stage 3  alpha_model.py                    Rank-average baseline + XGBoost (conditional)
-Stage 4  risk_model.py                     Ledoit-Wolf shrinkage covariance
-Stage 5  optimizer.py                      Mean-variance QP via cvxpy
-Stage 6  backtest_loop.py                  Monthly expanding-window rebalancing loop
-Stage 7  evaluation.py                     Sharpe, max drawdown, IC — all hand-rolled
-Stage 8  app.py                            Streamlit dashboard
-         run_pipeline.py                   End-to-end orchestration script
-Stage 5  Execution                         Skipped (see below)
+src/
+  universe.py        Universe construction + liquidity filters
+  data_pipeline.py   Clean, save, pivot to wide panels; Parquet I/O
+  factors.py         Momentum (12-1 month) + reversal (1 month) signals
+  alpha_model.py     Rank-average baseline + XGBoost alpha model
+  risk_model.py      Ledoit-Wolf shrinkage covariance
+  optimizer.py       Mean-variance QP (long-only, max 10% per stock)
+  backtest_loop.py   Monthly expanding-window rebalancing loop
+  evaluation.py      Sharpe, max drawdown, IC — hand-rolled
+data/                Parquet outputs (gitignored)
+tests/
+app.py               Streamlit dashboard
+run_pipeline.py      End-to-end orchestration
 ```
 
-### Universe (Stage 1)
+---
 
-Approximately 50 stocks sampled from the current S&P 500 constituent list
-(scraped from Wikipedia). Three liquidity/history filters are applied:
+## Stage Details
+
+### Universe
+
+Approximately 50 stocks drawn from the current S&P 500 constituent list (Wikipedia scrape, with a hardcoded large-cap fallback). Three filters applied:
 
 | Filter | Threshold |
 |---|---|
-| Minimum average closing price | $5 |
-| Minimum average dollar volume (ADV) | $5 M/day |
-| Minimum trading history | 756 days (~3 years) |
+| Min average closing price | $5 |
+| Min average dollar volume (ADV) | $5M / day |
+| Min trading history | 756 days (~3 years) |
 
 Five years of daily OHLCV data are downloaded via `yfinance`.
 
-### Factors (Stage 2)
+### Factors
 
 **Momentum** — 12-1 month return (skip-month convention):
 
@@ -88,9 +135,7 @@ Five years of daily OHLCV data are downloaded via `yfinance`.
 score(T) = price(T − 1 month) / price(T − 12 months) − 1
 ```
 
-The skip-month convention excludes the most recent month from the numerator
-because the last month's return is dominated by short-term reversal noise that
-would partially cancel the trend signal.
+The skip-month convention excludes the most recent month because short-term reversal noise in the last few weeks partially cancels the trend signal.
 
 **Reversal** — 1-month return:
 
@@ -98,204 +143,104 @@ would partially cancel the trend signal.
 score(T) = price(T) / price(T − 1 month) − 1
 ```
 
-Both factors use calendar-date lookbacks (`pd.DateOffset`) resolved to the last
-available trading day via `Series.asof()`, not positional row offsets. This
-prevents silent lookahead bias when any rows are missing.
+Both factors use calendar-date lookbacks (`pd.DateOffset`) resolved to the last available trading day via `Series.asof()` — not positional `shift(N)`. This matters: `shift(21)` lands on the wrong date whenever any rows are missing; `asof()` always returns a real price or `NaN`, which propagates cleanly through the pipeline.
 
-### Alpha model (Stage 3)
+### Alpha Model
 
-Two models compete. The backtest is run independently for each:
+Two models run in parallel. The backtest is executed independently for each, then compared on IC across all out-of-sample periods:
 
-**Rank-average baseline** (no training): cross-sectionally rank each factor as a
-percentile in (0, 1], with momentum ranked ascending (higher = stronger buy) and
-reversal ranked descending (lower/negative = stronger contrarian buy). Average the
-two percentile ranks into a combined alpha score.
+**Rank-average baseline** — no training. Each factor is ranked cross-sectionally as a percentile (momentum ascending, reversal descending) and the two percentile ranks are averaged into a combined alpha score.
 
-**XGBoost** (conditional): trained at each rebalance date on all historical
-`(factor_scores_at_T, forward_return_T→T+1)` pairs using an expanding window.
-Predicts cross-sectional forward returns from factor scores.
+**XGBoost** — trained at each rebalance date on all historical `(factor_scores_at_T, forward_return_T→T+1)` pairs using an expanding window. Shallow trees (`max_depth=3`), strong regularization.
 
-Both models expose the same `AlphaModel` interface (`fit()` / `predict_scores()`),
-so the backtest loop substitutes them without branching.
+Both expose the same `AlphaModel` interface (`fit()` / `predict_scores()`), so the backtest loop substitutes them without any branching.
 
-#### XGBoost decision
+### Risk Model
 
-XGBoost is retained only if it outperforms the rank-average baseline on IC
-(Spearman rank correlation between predicted scores and realised returns) across
-multiple out-of-sample rebalance periods. The decision is made automatically
-by `run_pipeline.py` and printed to the console.
+Ledoit-Wolf shrinkage covariance estimated from daily log returns, scaled ×21 to monthly units:
 
-**Result from this run (29 tickers, 47 out-of-sample periods, 2019-2024):**
+With ~50 assets and ~750 observations, the sample covariance condition number reaches into the thousands, making the QP numerically unstable. Ledoit-Wolf shrinks toward a scaled identity matrix with an analytically optimal coefficient and guarantees a positive semi-definite result. A `check_psd` assertion runs after every estimation.
 
-| Model | Sharpe (ann.) | Mean IC | IC IR |
-|---|---|---|---|
-| Rank-Average (baseline) | 1.13 | −0.0105 | −0.13 |
-| XGBoost | 0.94 | −0.0366 | −0.52 |
-
-**Decision: Rank-Average baseline retained.**  XGBoost shows worse IC and lower
-Sharpe — adding model complexity here is not justified.
-
-**Interpreting the results:**
-
-*Positive Sharpe despite negative IC* is expected and not a contradiction.
-The portfolio is long-only and fully invested, so it carries a positive beta to
-the market.  The sample period (2019–2024) included a strong equity bull run, so
-the portfolio earned a market premium regardless of how well the factor model
-ranked individual stocks cross-sectionally.  IC measures cross-sectional ranking
-accuracy; Sharpe measures total return risk-adjusted.
-
-*Near-zero IC* is also expected given the setup constraints:
-1. The universe is small (29 tickers after one download failure) — cross-sectional
-   variation in returns is limited with fewer stocks.
-2. The IC standard error is `std_IC / √N ≈ 0.10 / √47 ≈ 0.015`, so a mean IC of
-   −0.0105 is well within one standard error of zero — statistically indistinguishable
-   from a null signal.
-3. Survivorship bias inflates realised returns (market prices went up) without
-   improving cross-sectional predictive accuracy, which is what IC measures.
-
-If the margin is small or inconsistent, the simpler baseline wins — that is an
-honest finding, not a failure.  A model complexity increase must be justified by
-a reliable improvement in out-of-sample predictive accuracy.
-
-### Risk model (Stage 4)
-
-Ledoit-Wolf shrinkage covariance estimated from daily log returns, scaled by ×21
-(≈ trading days per month) to produce a monthly covariance consistent with the
-monthly rebalancing frequency.
-
-**Why Ledoit-Wolf**: with ~50 assets and ~750 daily observations the condition
-number of the sample covariance can be in the thousands, making the optimizer
-unstable. Ledoit-Wolf shrinks toward a scaled identity matrix with an analytically
-optimal coefficient and guarantees a positive semi-definite result (required by
-the cvxpy solver).
-
-A PSD assertion (`check_psd`) is run after every estimation as a defensive guard.
-
-### Optimizer (Stage 5)
+### Optimizer
 
 Mean-variance QP solved via cvxpy:
 
 ```
-maximise  w^T μ − risk_aversion × w^T Σ w
+maximise  w^T μ − λ · w^T Σ w
 subject to
-  Σ w_i = 1    (fully invested)
-  w_i ≥ 0      (long-only, no shorting)
-  w_i ≤ 0.10   (max 10% per stock)
+  Σ w_i = 1      (fully invested)
+  w_i ≥ 0        (long-only)
+  w_i ≤ 0.10     (max 10% per stock)
 ```
 
-`μ` is the cross-sectional alpha score vector; `Σ` is the monthly Ledoit-Wolf
-covariance. Tickers with NaN alpha scores (insufficient lookback history) are
-excluded from the QP and assigned weight 0; the remaining weights still sum to 1.
+`μ` is the alpha score vector; `Σ` is the Ledoit-Wolf monthly covariance. Tickers with NaN alpha scores are excluded from the QP and assigned weight zero; remaining weights still sum to 1.
 
-### Backtest loop (Stage 6)
+### Backtest Loop
 
-Monthly rebalancing with an expanding window:
+Monthly rebalancing, expanding window:
 
-1. At each rebalance date T (after a 13-month burn-in), slice all data to `[start, T]`.
-2. Compute factor panels on the slice — no future prices used.
-3. Fit the alpha model on all observable `(factor_scores_at_t, forward_return)` pairs
-   strictly before T.
-4. Predict alpha scores at T.
-5. Estimate the Ledoit-Wolf covariance from log returns up to T.
-6. Solve the mean-variance QP for portfolio weights.
-7. Compute the simple portfolio return for `[T, T+1]`.
+1. At rebalance date T (after a 13-month burn-in), slice all data to `[start, T]`
+2. Compute factor panels on the slice — no future prices used
+3. Fit the alpha model on all `(factor_scores_at_t, forward_return)` pairs before T
+4. Predict alpha scores at T
+5. Estimate Ledoit-Wolf covariance from log returns up to T
+6. Solve the mean-variance QP for portfolio weights
+7. Compute simple portfolio return for `[T, T+1]`
 
-**Expanding vs rolling window**: this implementation uses a growing training set
-(more data at each step). Rolling window with a fixed lookback is a future extension.
+The 13-month burn-in covers the 12-month momentum lookback plus one safety month. Execution is assumed frictionless at end-of-month closing prices.
 
-### Evaluation (Stage 7)
+### Evaluation
 
-All metrics are hand-rolled from first principles:
+All metrics are hand-rolled:
 
-| Metric | Formula | Note |
+| Metric | Formula | Convention |
 |---|---|---|
-| Sharpe ratio | `mean(r − rf_m) / std(r − rf_m) × √12` | Monthly series, annualised ×√12 |
-| Max drawdown | `min((cum_value − cum_peak) / cum_peak)` | Most negative value |
+| Sharpe ratio | `mean(r − rf_m) / std(r − rf_m) × √12` | Monthly series; rf = 2% p.a. |
+| Max drawdown | `min((cum_value − cum_peak) / cum_peak)` | Most negative trough |
 | IC | `Pearson(rank(scores), rank(returns))` per date | Spearman = Pearson of ranks |
 | IC IR | `mean_IC / std_IC × √12` | Signal consistency |
 
+Annualization uses **×√12** (monthly returns), not ×√252 which applies to daily series. Risk-free rate is a constant 2% p.a. — a defensible approximation for a multi-year backtest where the key requirement is that it is stated and applied consistently.
+
 ---
 
-## Key design decisions
+## Design Decisions
 
 ### Why reversal instead of P/E
 
-`yfinance.Ticker.info["trailingPE"]` returns the *current* price-to-earnings ratio,
-not the historical P/E as of any past date. Using it in a backtest would leak today's
-valuation data into every historical period — a straightforward form of lookahead bias.
-Reversal uses the same price data as momentum and is strictly point-in-time safe.
+`yfinance.Ticker.info["trailingPE"]` returns the *current* price-to-earnings ratio, not a historical time series. Using it in a backtest would write today's valuation data into every historical rebalance date — a direct form of lookahead bias. Reversal uses only the same price data as momentum and is strictly point-in-time safe.
 
-### Why execution is skipped
+### Expanding window, not rolling
 
-Stage 5 (execution / transaction cost modelling) is out of scope for research-track
-roles. A one-sentence callout is the appropriate treatment: the pipeline assumes
-frictionless execution at end-of-month closing prices. Real implementation would
-require market-impact and bid-ask models, which vary by asset size and broker.
+An expanding training set (all data up to T) is simpler and accumulates more observations over time. A fixed-lookback rolling window reduces distribution shift at the cost of throwing away early data; it is the natural next iteration.
+
+### No execution stage
+
+Transaction cost modelling is a separate skill set and less relevant to research-track roles. The pipeline assumes frictionless execution. Real implementation would require market-impact and bid-ask spread models, which vary by asset size and broker.
 
 ---
 
-## Known limitations
+## Known Limitations
 
-### Survivorship bias
+**Survivorship bias** — the universe is the *current* S&P 500 membership applied to historical prices. Stocks that were constituents during the sample period but were subsequently removed (bankruptcy, merger, reconstitution) are absent. This imparts an upward bias to all reported returns. True point-in-time universe construction requires a historical constituents database (Compustat, Bloomberg).
 
-The universe is constructed from the **current** S&P 500 constituent list, then
-historical prices are fetched for those tickers. Stocks that were members of the
-index during the sample period but were subsequently removed (due to bankruptcy,
-merger, or index reconstitution) are absent. This imparts an upward bias to all
-reported returns because the universe is tilted toward companies that survived and
-remained large-cap throughout the sample.
+**Statistical uncertainty** — 47 independent monthly periods over 5 years is a small sample. At a typical monthly IC of 0.03–0.06 the standard error of the mean IC is ≈ 0.008, giving wide confidence intervals around all reported Sharpe and IC estimates. These numbers characterize the pipeline's behavior on this sample; they are not a robust claim about forward performance.
 
-True point-in-time universe construction requires a historical constituents database
-(e.g., Compustat or a commercial vendor feed), which is outside the scope of this
-project.
-
-### yfinance download failures
-
-Occasional tickers fail to download (e.g., `MRK: OperationalError('database is locked')`).
-This is a transient `yfinance` issue and does not indicate a code bug.  Failed tickers
-are silently dropped; the universe shrinks by the number of failures.  Re-running the
-pipeline usually resolves them.  Set `FORCE_REFRESH = True` in `run_pipeline.py` to
-re-attempt all downloads.
-
-### Statistical uncertainty (sample size)
-
-With a 5-year data window and 13-month burn-in, the backtest produces approximately
-**35–50 independent monthly rebalance periods**. At a typical monthly IC of 0.03–0.06,
-the standard error of the mean IC is `std_IC / √N ≈ 0.05 / √40 ≈ 0.008`. Confidence
-intervals around all reported Sharpe ratios and IC estimates are therefore wide.
-The results illustrate the pipeline architecture and methodology; they are not a
-statistically robust claim about live performance.
+**Universe size** — 29 tickers after download failures limits cross-sectional variation and makes it harder for any ranking model to demonstrate reliable IC.
 
 ---
 
-## Conventions
-
-**Risk-free rate**: constant 2% per annum → `rf_monthly = 0.02 / 12 ≈ 0.00167`.
-A constant approximation is appropriate here; the key requirement is that it is
-stated explicitly and applied consistently.
-
-**Sharpe annualisation**: monthly excess-return Sharpe × **√12** (not ×√252,
-which is the correct factor for daily returns). The return series is monthly, so
-monthly compounding applies.
-
-**Portfolio returns**: simple returns are used for portfolio arithmetic
-(`Σ w_i × r_i`), because simple returns aggregate linearly across assets.
-Log returns are used for the covariance estimation (more statistically stable),
-then scaled to monthly units before being passed to the optimizer.
-
----
-
-## Future extensions
+## Future Extensions
 
 | Extension | Notes |
 |---|---|
-| Rolling window | Fixed lookback instead of expanding; reduces distribution shift |
+| Rolling window | Fixed lookback reduces distribution shift at late periods |
 | Walk-forward XGBoost tuning | Re-tune `max_depth`, `learning_rate` at each step |
 | Additional factors | Quality (ROE stability), value (book-to-market from financial statements) |
-| Sector / country constraints | Add linear inequality constraints to the cvxpy QP |
-| Risk parity | Equalise marginal risk contributions instead of mean-variance |
+| Sector / country constraints | Linear inequality constraints in the cvxpy QP |
+| Risk parity | Equalize marginal risk contributions; no matrix inversion needed |
 | Black-Litterman | Blend market-implied returns with factor views |
-| HRP (Hierarchical Risk Parity) | Cluster-based allocation, no matrix inversion |
-| True point-in-time universe | Historical S&P 500 constituents database |
-| Transaction cost model | Market-impact + bid-ask spread; compute net-of-cost returns |
-| VaR / CVaR constraints | Add tail-risk budget to the QP |
+| HRP | Cluster-based allocation via hierarchical linkage |
+| Point-in-time universe | Historical S&P 500 constituents from Compustat or a vendor feed |
+| Transaction cost model | Market-impact + bid-ask spread; net-of-cost returns |
+| VaR / CVaR constraints | Tail-risk budget added to the QP |
